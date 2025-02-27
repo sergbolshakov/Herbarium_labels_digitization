@@ -35,7 +35,6 @@ data_display_edit_ui <- function(id) {
     ),
     div(
       uiOutput(ns("data_ui")),
-      # Вписать по высоте и добавить scrollbar
       style = "height: calc(100vh - 100px); overflow-y: auto;"
     )
   )
@@ -43,12 +42,42 @@ data_display_edit_ui <- function(id) {
 
 #' Server модуля просмотра и редактирования данных
 #' @param id Идентификатор модуля
-#' @param data Реактивное значение с данными из data.tsv
 #' @param filtered_files Реактивное значение со списком файлов
 #' @param current_index Реактивное значение с текущим индексом выбранного файла
-data_display_edit_server <- function(id, data, filtered_files, current_index) {
+#' @param update_file Функция обновления названия файла (из модуля выбора директории)
+#' @param set_index Функция обновления выбранного индекса (из модуля выбора директории)
+data_display_edit_server <- function(id,
+                                     filtered_files,
+                                     current_index,
+                                     update_file,
+                                     set_index) {
   
   moduleServer(id, function(input, output, session) {
+    
+    # Загрузка данных из data.tsv
+    data <- reactiveVal()
+    
+    observe({
+      # Обработчик возможных ошибок при загрузке файла
+      try_fetch(
+        {
+          if (file_exists("data.tsv")) {
+            data(read_tsv("data.tsv", 
+                          col_types = cols(.default = col_character())))
+          } else {
+            showNotification("Файл data.tsv не найден в корне проекта!", 
+                             type = "error")
+          }
+        },
+        # Если при чтении файла возникла ошибка
+        error = function(cnd) {
+          showNotification(
+            sprintf("Ошибка при загрузке data.tsv: %s", cnd$message),
+            type = "error"
+          )
+        }
+      )
+    })
     
     # Начальные реактивные значения
     rv <- reactiveValues(
@@ -62,17 +91,18 @@ data_display_edit_server <- function(id, data, filtered_files, current_index) {
     
     # Генерация UI -------------------------------------------------------------
     output$data_ui <- renderUI({
-      # Проверяю наличие списка файлов, индекса выбранного файла и данных
+      # Проверка наличия списка файлов, индекса выбранного файла и данных
       req(filtered_files(), current_index(), data())
       
-      # Получаю имя выбранного файла без расширения по его индексу
+      # Получаю название выбранного файла без расширения по его индексу
       current_file <- 
-        filtered_files()[current_index()] %>%
-        path_file() %>%
+        filtered_files()[current_index()] %>% 
+        path_file() %>% 
         path_ext_remove()
       
       # Ищу запись в данных с таким же названием файла
-      record <- data() %>%
+      record <- 
+        data() %>% 
         filter(imageFile == current_file)
       
       # Если запись для выбранного файла не найдена в данных
@@ -80,7 +110,7 @@ data_display_edit_server <- function(id, data, filtered_files, current_index) {
         # Создаю новую пустую запись с такими же именами полей
         # и заполняю значения полей NA и именем выбранного файла
         record <- 
-          data() %>%
+          data() %>% 
           slice(0) %>%
           add_row(imageFile = current_file) %>%
           mutate(across(everything(), ~ NA_character_))
@@ -110,10 +140,7 @@ data_display_edit_server <- function(id, data, filtered_files, current_index) {
                 # catalogNumber должен быть обязательно заполнен
                 textAreaInput(
                   inputId = session$ns(.x),
-                  label = span(
-                    .x,
-                    span("*", style = "color: red;")
-                  ),
+                  label = span(.x, span("*", style = "color: red;")),
                   value = value,
                   placeholder = "Обязательное поле"
                 )
@@ -139,12 +166,12 @@ data_display_edit_server <- function(id, data, filtered_files, current_index) {
               }
             })
           )
-          
+        
         # В режиме просмотра
         } else {
-         # Показываю только заполненные поля
+          # Показываю только заполненные поля
           display_data <- 
-            record %>%
+            record %>% 
             select(where(~ !is.na(.x) & .x != ""))
           
           # Если данных нет, показываю сообщение
@@ -166,12 +193,11 @@ data_display_edit_server <- function(id, data, filtered_files, current_index) {
         # Отступы от краев для всего контейнера
         style = "padding: 10px;"
       )
-      
     })
     
-    # Сохранение данных --------------------------------------------------------
+    # Сохранение данных и переименование файлов --------------------------------
     observeEvent(input$save_data, {
-      # Проверяю наличие текущей записи и индекса выбранного файла
+      # Проверка наличия текущей записи и индекса выбранного файла
       req(rv$current_record, current_index())
       
       # Проверка заполнения обязательного поля
@@ -181,42 +207,110 @@ data_display_edit_server <- function(id, data, filtered_files, current_index) {
         return()
       }
       
-      # Обработчик сохранения
-      rlang::try_fetch(
-        {
-          # Создаю отредактированную запись:
-          # 1. Прохожу по всем полям текущей записи
-          # 2. Получаю новые значения из полей ввода
-          # 3. Преобразую пустые значения в NA
-          edited_record <- names(rv$current_record) %>%
-            map_dfc(\(field_name) {
-              value <- input[[field_name]]
-              # Одноклеточный tibble с названием из имени поля ввода
-              tibble(!!field_name := if_else(is.null(value) || value == "", 
-                                             NA_character_,
-                                             value))
-            })
-          
-          # Обновляю или добавляю данные по ключу imageFile
-          data(data() %>%
-                 rows_upsert(edited_record, by = "imageFile"))
-          
-          # Сохраняю отредактированные данные в файл
-          write_tsv(data(), "data.tsv", na = "", escape = "none")
-          
-          # Выключаю режим редактирования
-          rv$is_editing <- FALSE
-          
-          # Уведомление о сохранении
-          showNotification("Данные успешно сохранены", type = "message")
-        },
+      # Обработчик переименования файлов и сохранения данных
+      try_fetch({
+        # 1. Обновление данных отредактированной записью
+        edited_record <- 
+          names(rv$current_record) %>%
+          map_dfc(\(field_name) {
+            value <- input[[field_name]]
+            tibble(!!field_name := if_else(is.null(value) || value == "",
+                                           NA_character_,
+                                           value))
+          })
         
-        # Обработка ошибок при сохранении
-        error = function(cnd) {
-          showNotification(str_c("Ошибка сохранения: ", cnd$message),
-                           type = "error")
+        # Обновляю или добавляю данные по ключу imageFile
+        data_updated <- data() %>% 
+          rows_upsert(edited_record, by = "imageFile")
+        
+        # 2. Переименование файлов
+        current_file_path <- filtered_files()[current_index()]
+        current_file_name <- path_file(current_file_path) %>% path_ext_remove()
+        current_catalog <- str_trim(input$catalogNumber)
+        new_base <- str_c("LE F-", current_catalog)
+        # По умолчанию новый путь равен старому
+        current_new_full_path <- current_file_path
+        
+        if (!str_detect(current_file_name, fixed(new_base))) {
+          file_dir <- path_dir(current_file_path)
+          
+          # Проверяю файлы с заданным паттерном
+          regex_pattern <- regex(
+            str_c("^LE\\s+F\\-", current_catalog, "(_\\d+)?$"),
+            ignore_case = TRUE
+          )
+          
+          existing_files <- dir_ls(file_dir) %>%
+            keep(~ str_detect(path_file(.) %>% path_ext_remove(), regex_pattern))
+          
+          if (!current_file_path %in% existing_files)
+            existing_files <- c(existing_files, current_file_path)
+          
+          if (length(existing_files) > 1) {
+            # Групповое переименование: порядок определяется по времени изменения
+            file_info <- file_info(existing_files)
+            order_idx <- order(file_info$modification_time)
+            ordered_files <- existing_files[order_idx]
+            rename_map <- tibble(
+              old = map_chr(ordered_files, ~ path_file(.) %>% path_ext_remove()),
+              new = str_c(new_base, "_", seq_along(ordered_files))
+            )
+            
+            walk2(ordered_files, rename_map$new, function(old_path, new_name) {
+              ext <- path_ext(old_path)
+              new_file_name <- str_c(new_name, ".", ext)
+              new_path <- path(file_dir, new_file_name)
+              file_move(old_path, new_path)
+              # Обновляю список файлов в модуле выбора
+              update_file(old_path, new_path)
+              if (old_path == current_file_path) {
+                current_new_full_path <<- new_path
+              }
+            })
+            
+            data_updated <- 
+              data_updated %>% 
+              mutate(imageFile = map_chr(imageFile, function(fname) {
+                new_val <- rename_map %>% filter(old == fname) %>% pull(new)
+                if (length(new_val) == 0) fname else new_val
+              }))
+          } else {
+            ext <- path_ext(current_file_path)
+            new_file_full <- str_c(new_base, ".", ext)
+            new_path <- path(file_dir, new_file_full)
+            file_move(current_file_path, new_path)
+            current_new_full_path <- new_path
+            update_file(current_file_path, new_path)
+            data_updated <- 
+              data_updated %>% 
+              mutate(imageFile = if_else(imageFile == current_file_name,
+                                         new_base,
+                                         imageFile))
+          }
+          # Уведомление о переименовании
+          showNotification("Файл(ы) был(и) автоматически переименован(ы)",
+                           type = "message")
         }
-      )
+        
+        # 3. Сохранение итоговых данных в файл
+        data(data_updated)
+        write_tsv(data_updated, "data.tsv", na = "", escape = "none")
+        
+        # Устанавливаю текущий индекс
+        set_index(current_index())
+        
+        # Выключаю режим редактирования
+        rv$is_editing <- FALSE
+        
+        # Уведомление о сохранении
+        showNotification("Данные успешно сохранены", type = "message")
+      },
+      
+      # Обработка ошибок при сохранении
+      error = function(cnd) {
+        showNotification(str_c("Ошибка сохранения: ", cnd$message),
+                         type = "error")
+      })
     })
     
     # Управление видимостью кнопок ---------------------------------------------

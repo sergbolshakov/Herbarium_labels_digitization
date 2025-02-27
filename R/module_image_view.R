@@ -39,7 +39,7 @@ image_view_server <- function(id, filtered_files, selected_index, set_index) {
   
   moduleServer(id, function(input, output, session) {
    
-     # Начальные реактивные значения
+    # Начальные реактивные значения
     rv <- reactiveValues(
       index = 1
     )
