@@ -89,7 +89,7 @@ data_display_edit_server <- function(id,
     observeEvent(input$edit_data, { rv$is_editing <- TRUE })
     observeEvent(input$cancel_editing, { rv$is_editing <- FALSE })
     
-    # Генерация UI -------------------------------------------------------------
+    # Генерация UI =============================================================
     output$data_ui <- renderUI({
       # Проверка наличия списка файлов, индекса выбранного файла и данных
       req(filtered_files(), current_index(), data())
@@ -195,7 +195,7 @@ data_display_edit_server <- function(id,
       )
     })
     
-    # Сохранение данных и переименование файлов --------------------------------
+    # Сохранение данных и переименование файлов ================================
     observeEvent(input$save_data, {
       # Проверка наличия текущей записи и индекса выбранного файла
       req(rv$current_record, current_index())
@@ -209,65 +209,159 @@ data_display_edit_server <- function(id,
       
       # Обработчик переименования файлов и сохранения данных
       try_fetch({
-        # 1. Обновление данных отредактированной записью
+        # Обновление данных отредактированной записью --------------------------
         edited_record <- 
           names(rv$current_record) %>%
           map_dfc(\(field_name) {
             value <- input[[field_name]]
-            tibble(!!field_name := if_else(is.null(value) || value == "",
+            tibble(!!field_name := if_else(is.null(value) || value == "", 
                                            NA_character_,
                                            value))
           })
         
         # Обновляю или добавляю данные по ключу imageFile
-        data_updated <- data() %>% 
+        data_updated <- data() %>%
           rows_upsert(edited_record, by = "imageFile")
         
-        # 2. Переименование файлов
+        # Переименование файлов ------------------------------------------------
         current_file_path <- filtered_files()[current_index()]
-        current_file_name <- path_file(current_file_path) %>% path_ext_remove()
-        current_catalog <- str_trim(input$catalogNumber)
-        new_base <- str_c("LE F-", current_catalog)
         # По умолчанию новый путь равен старому
-        current_new_full_path <- current_file_path
+        current_file_new_path <- current_file_path
+        current_file_name <- 
+          path_file(current_file_path) %>% 
+          path_ext_remove()
+        current_file_dir <- path_dir(current_file_path)
+        current_number <- str_trim(input$catalogNumber)
+        new_base <- str_c("LE F-", current_number)
+        three_word_pattern <- regex("^([A-Za-z]+)[ _]([A-Za-z-]+)[ _].+$")
         
-        if (!str_detect(current_file_name, fixed(new_base))) {
-          file_dir <- path_dir(current_file_path)
+        # Если название файла состоит из трёх слов
+        if (str_detect(current_file_name, three_word_pattern)) {
+          # Разбиваю название на части по пробелу или подчёркиванию
+          parts <- str_split(current_file_name, "[ _]")[[1]]
+          if (length(parts) >= 2) {
+            prefix1 <- parts[1]
+            prefix2 <- parts[2]
+            candidate <- str_c(prefix1, " ", prefix2, " ", new_base)
+          } else {
+            candidate <- new_base
+          }
+          # Регулярное выражение для поиска файлов 
+          # с теми же первыми двумя словами и номером образца
+          pattern_candidate <- 
+            regex(
+              str_c("^", prefix1, "[ _]", prefix2, "[ _]", new_base, "(_\\d+)?$"),
+              ignore_case = TRUE
+            )
           
-          # Проверяю файлы с заданным паттерном
+          # Поиск таких файлов
+          existing_files <- 
+            dir_ls(current_file_dir) %>% 
+            keep(~ {
+              file_names <- 
+                path_file(.) %>% 
+                path_ext_remove()
+              str_detect(file_names, pattern_candidate)
+            })
+          if (!current_file_path %in% existing_files)
+            existing_files <- c(existing_files, current_file_path)
+          
+          # Если файлы с таким номером уже есть
+          if (length(existing_files) > 1) {
+            # Сортировка чтобы сохранить исходный порядок
+            ordered_files <- sort(existing_files)
+            # Групповое переименование с добавлением суффиксов
+            rename_map <- tibble(
+              old = map_chr(ordered_files, ~ path_file(.) %>% path_ext_remove()),
+              new = str_c(candidate, "_", seq_along(ordered_files))
+            )
+            walk2(ordered_files, rename_map$new, function(old_path, new_name) {
+              ext <- path_ext(old_path)
+              new_file_name <- str_c(new_name, ".", ext)
+              new_path <- path(current_file_dir, new_file_name)
+              file_move(old_path, new_path)
+              # Обновление списка файлов в модуле выбора
+              update_file(old_path, new_path)
+              if (old_path == current_file_path) {
+                current_file_new_path <<- new_path
+              }
+            })
+            # Обновление данных
+            data_updated <- 
+              data_updated %>% 
+              mutate(imageFile = map_chr(imageFile, function(fname) {
+                new_val <- rename_map %>% filter(old == fname) %>% pull(new)
+                if (length(new_val) == 0) fname else new_val
+              }))
+            
+            # Если файл один такой, просто переименовываю его с сохранением первых двух слов
+          } else {
+            ext <- path_ext(current_file_path)
+            new_file_full <- str_c(candidate, ".", ext)
+            new_path <- path(current_file_dir, new_file_full)
+            file_move(current_file_path, new_path)
+            # Обновление списка файлов в модуле выбора
+            update_file(current_file_path, new_path)
+            # Обновление данных
+            data_updated <- 
+              data_updated %>% 
+              mutate(imageFile = if_else(imageFile == current_file_name,
+                                         candidate,
+                                         imageFile))
+            current_file_new_path <- new_path
+          }
+          
+          # Сообщение о переименовании
+          showNotification("Файл(ы) был(и) автоматически переименован(ы)",
+                           type = "message")
+          
+        # Если название файла состоит одного или двух слов
+        } else if (!str_detect(current_file_name, fixed(new_base))) {
+          
+          # Регулярное выражение для поиска файлов с таким же номером образца в названии
           regex_pattern <- regex(
-            str_c("^LE\\s+F\\-", current_catalog, "(_\\d+)?$"),
+            str_c("^LE\\s+F\\-", current_number, "(_\\d+)?$"),
             ignore_case = TRUE
           )
-          
-          existing_files <- dir_ls(file_dir) %>%
+          # Поиск таких файлов
+          existing_files <- 
+            dir_ls(current_file_dir) %>% 
             keep(~ str_detect(path_file(.) %>% path_ext_remove(), regex_pattern))
           
           if (!current_file_path %in% existing_files)
             existing_files <- c(existing_files, current_file_path)
           
+          # Если файлы с таким номером уже есть
           if (length(existing_files) > 1) {
-            # Групповое переименование: порядок определяется по времени изменения
+            # Порядок файлов для группового переименования определяется по времени изменения
             file_info <- file_info(existing_files)
             order_idx <- order(file_info$modification_time)
             ordered_files <- existing_files[order_idx]
+            
+            # Групповое переименование с добавлением суффиксов
             rename_map <- tibble(
               old = map_chr(ordered_files, ~ path_file(.) %>% path_ext_remove()),
               new = str_c(new_base, "_", seq_along(ordered_files))
             )
-            
+            current_file_new_path <- NA_character_
             walk2(ordered_files, rename_map$new, function(old_path, new_name) {
               ext <- path_ext(old_path)
               new_file_name <- str_c(new_name, ".", ext)
-              new_path <- path(file_dir, new_file_name)
+              new_path <- path(current_file_dir, new_file_name)
               file_move(old_path, new_path)
-              # Обновляю список файлов в модуле выбора
+              # Обновление списка файлов в модуле выбора
               update_file(old_path, new_path)
               if (old_path == current_file_path) {
-                current_new_full_path <<- new_path
+                current_file_new_path <<- new_path
               }
             })
+            if (is.na(current_file_new_path)) {
+              current_file_new_path <- path(current_file_dir, str_c(
+                new_base, ".", path_ext(current_file_path)
+              ))
+            }
             
+            # Обновление данных
             data_updated <- 
               data_updated %>% 
               mutate(imageFile = map_chr(imageFile, function(fname) {
@@ -277,22 +371,22 @@ data_display_edit_server <- function(id,
           } else {
             ext <- path_ext(current_file_path)
             new_file_full <- str_c(new_base, ".", ext)
-            new_path <- path(file_dir, new_file_full)
+            new_path <- path(current_file_dir, new_file_full)
             file_move(current_file_path, new_path)
-            current_new_full_path <- new_path
             update_file(current_file_path, new_path)
             data_updated <- 
               data_updated %>% 
               mutate(imageFile = if_else(imageFile == current_file_name,
                                          new_base,
                                          imageFile))
+            current_file_new_path <- new_path
           }
-          # Уведомление о переименовании
+          # Сообщение о переименовании
           showNotification("Файл(ы) был(и) автоматически переименован(ы)",
                            type = "message")
         }
         
-        # 3. Сохранение итоговых данных в файл
+        # Обновление реактивных данных и сохранение в файл ---------------------
         data(data_updated)
         write_tsv(data_updated, "data.tsv", na = "", escape = "none")
         
@@ -302,8 +396,9 @@ data_display_edit_server <- function(id,
         # Выключаю режим редактирования
         rv$is_editing <- FALSE
         
-        # Уведомление о сохранении
+        # Сообщение о сохранении
         showNotification("Данные успешно сохранены", type = "message")
+        
       },
       
       # Обработка ошибок при сохранении
@@ -311,6 +406,7 @@ data_display_edit_server <- function(id,
         showNotification(str_c("Ошибка сохранения: ", cnd$message),
                          type = "error")
       })
+      
     })
     
     # Управление видимостью кнопок ---------------------------------------------
