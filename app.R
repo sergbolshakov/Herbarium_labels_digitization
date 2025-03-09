@@ -45,6 +45,7 @@ server <- function(input, output, session) {
   # Инициализация модуля просмотра и редактирования данных
   data <- data_display_edit_server(
     "data",
+    files$all_files,
     files$filtered_files,
     current_index,
     files$update_file,

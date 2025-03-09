@@ -51,8 +51,6 @@ directory_files_server <- function(id) {
             # Для сохранения порядка файлов при обновлении названий
             rv$files_list <- 
               dir_ls(selected_path) %>% 
-              str_subset(regex("\\.(jpg|jpeg|tif|tiff|webp)$",
-                               ignore_case = TRUE)) %>% 
               as.character()
           }
         },
@@ -66,7 +64,9 @@ directory_files_server <- function(id) {
     # Получение списка файлов изображений
     image_files <- reactive({
       req(rv$files_list)
-      rv$files_list
+      rv$files_list %>%
+        str_subset(regex("\\.(jpg|jpeg|tif|tiff|webp)$",
+                         ignore_case = TRUE)) 
     })
     
     # Форма для поиска создаётся только после получения списка файлов
@@ -138,6 +138,7 @@ directory_files_server <- function(id) {
     
     # Возврат реактивных значений
     list(
+      all_files = reactive({ rv$files_list }),
       filtered_files = reactive({ rv$filtered_files }),
       selected_index = reactive({ rv$current_index }),
       set_index = function(index) {
