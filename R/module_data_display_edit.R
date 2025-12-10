@@ -73,7 +73,7 @@ data_display_edit_server <- function(id, data, filtered_files, current_index) {
       
       # Ищу запись в данных с таким же названием файла
       record <- data() %>%
-        filter(imageFile == current_file)
+        filter(str_detect(current_file, catalogNumber))
       
       # Если запись для выбранного файла не найдена в данных
       if (nrow(record) == 0) {
@@ -99,7 +99,7 @@ data_display_edit_server <- function(id, data, filtered_files, current_index) {
               # Определяю значения полей
               value <- case_when(
                 # Автоматически заполняемые значения
-                .x == "imageFile" ~ current_file,
+                .x == "imageFile" ~ str_extract(current_file, "LE F-\\d{1,6}"),
                 .x == "logCreatedWhen" ~ format(Sys.Date(), "%Y-%m-%d"),
                 # Для остальных — существующее значение или пустая строка
                 .default = coalesce(record[[.x]], "")
@@ -116,6 +116,23 @@ data_display_edit_server <- function(id, data, filtered_files, current_index) {
                   ),
                   value = value,
                   placeholder = "Обязательное поле"
+                )
+              } else if (str_detect(.x, "^verbatim")) {
+                # Все поля с оригинальным текстом выделены голубым
+                tags$div(
+                  style = "
+                  border: 1px solid #007bff; 
+                  border-radius: 2px; 
+                  padding: 4px; 
+                  background-color: #eaf4fb;
+                  margin-bottom: 5px;
+                  ",
+                  textAreaInput(
+                    inputId = session$ns(.x),
+                    label = .x,
+                    value = value,
+                    placeholder = "Текстовое поле"
+                  )
                 )
               } else if (.x == "logCreatedWhen") {
                 # Для logCreatedWhen ввод заблокирован с текущей датой
@@ -197,9 +214,9 @@ data_display_edit_server <- function(id, data, filtered_files, current_index) {
                                              value))
             })
           
-          # Обновляю или добавляю данные по ключу imageFile
+          # Обновляю или добавляю данные по ключу catalogNumber
           data(data() %>%
-                 rows_upsert(edited_record, by = "imageFile"))
+                 rows_upsert(edited_record, by = "catalogNumber"))
           
           # Сохраняю отредактированные данные в файл
           write_tsv(data(), "data.tsv", na = "", escape = "none")
